@@ -1,3 +1,32 @@
+# 02_explore_data.R
+# Explore downloaded RDS files
+
+# Install once if needed:
+# install.packages("data.table")
+
+library(data.table)
+
+# Folder created by 01_download_data.R
+out_dir <- "data/raw/zenodo_20479866"
+
+# Find all RDS files, including files inside subfolders
+rds_files <- list.files(
+  path = out_dir,
+  pattern = "\\.rds$",
+  full.names = TRUE,
+  recursive = TRUE
+)
+
+if (length(rds_files) == 0) {
+  stop(
+    "No RDS files found in: ", out_dir,
+    ". Run 01_download_data.R first."
+  )
+}
+
+message("Number of RDS files found: ", length(rds_files))
+
+# Check contents of every RDS file
 for (file in rds_files) {
   object <- readRDS(file)
   
@@ -20,13 +49,20 @@ for (file in rds_files) {
   }
 }
 
-install.packages(c("data.table", "ggplot2"))
-
+# Use the first RDS file for summary statistics
 hydro_data <- as.data.table(readRDS(rds_files[1]))
 
+# Identify numeric columns
 numeric_cols <- names(hydro_data)[sapply(hydro_data, is.numeric)]
+
+if (length(numeric_cols) == 0) {
+  stop("The first RDS file has no numeric columns.")
+}
+
+# Create summary statistics
 stats_table <- rbindlist(lapply(numeric_cols, function(col) {
   x <- hydro_data[[col]]
+  
   data.table(
     variable = col,
     mean = mean(x, na.rm = TRUE),
@@ -39,4 +75,16 @@ stats_table <- rbindlist(lapply(numeric_cols, function(col) {
     q75 = quantile(x, 0.75, na.rm = TRUE)
   )
 }))
+
 print(stats_table)
+
+# Optional: save statistics
+dir.create("outputs", showWarnings = FALSE, recursive = TRUE)
+
+write.csv(
+  stats_table,
+  "outputs/summary_statistics.csv",
+  row.names = FALSE
+)
+
+message("Summary statistics saved in: outputs/summary_statistics.csv")
