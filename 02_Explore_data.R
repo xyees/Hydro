@@ -1,15 +1,7 @@
-# 02_explore_data.R
-# Explore downloaded RDS files
-
-# Install once if needed:
-# install.packages("data.table")
-
 library(data.table)
 
-# Folder created by 01_download_data.R
 out_dir <- "data/raw/zenodo_20479866"
 
-# Find all RDS files, including files inside subfolders
 rds_files <- list.files(
   path = out_dir,
   pattern = "\\.rds$",
@@ -26,7 +18,6 @@ if (length(rds_files) == 0) {
 
 message("Number of RDS files found: ", length(rds_files))
 
-# Check contents of every RDS file
 for (file in rds_files) {
   object <- readRDS(file)
   
@@ -49,10 +40,8 @@ for (file in rds_files) {
   }
 }
 
-# Use the first RDS file for summary statistics
 hydro_data <- as.data.table(readRDS(rds_files[1]))
 
-# Identify numeric columns
 numeric_cols <- names(hydro_data)[sapply(hydro_data, is.numeric)]
 
 if (length(numeric_cols) == 0) {
@@ -78,7 +67,7 @@ stats_table <- rbindlist(lapply(numeric_cols, function(col) {
 
 print(stats_table)
 
-# Optional: save statistics
+# save statistics
 dir.create("outputs", showWarnings = FALSE, recursive = TRUE)
 
 write.csv(
