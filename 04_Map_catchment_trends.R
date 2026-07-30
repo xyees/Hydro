@@ -1,17 +1,27 @@
+# install.packages(c("jsonlite", "sf", "ggplot2",
+#                    "rnaturalearth", "rnaturalearthdata"))
+
 library(jsonlite)
 library(sf)
 library(ggplot2)
 
-options(timeout = 360)
-
-# Zenodo record
 record_id <- "21223242"
 
-out_dir <- paste0("data/raw/zenodo_", record_id)
-dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+start_year <- 1980
+end_year <- 2020
+time_period <- paste0(start_year, "–", end_year)
 
-output_dir <- "outputs/maps"
+# Allow sufficient time for large Zenodo downloads
+options(timeout = 3600)
+
+# Folders
+out_dir <- paste0("data/raw/zenodo_", record_id)
+output_dir <- "outputs/catchment_trends"
+shapefile_dir <- file.path(output_dir, "catchment_shapefile")
+
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(shapefile_dir, showWarnings = FALSE, recursive = TRUE)
 
 api_url <- paste0("https://zenodo.org/api/records/", record_id)
 
@@ -35,6 +45,7 @@ for (f in record$files) {
     !is.na(expected_size) &&
     file.info(out_file)$size == expected_size
   
+  # Remove incomplete downloads before downloading again
   if (file.exists(out_file) && !complete_file) {
     message("Removing incomplete file: ", f$key)
     file.remove(out_file)
@@ -55,6 +66,8 @@ for (f in record$files) {
     quiet = FALSE
   )
 }
+
+# Load Zenodo RDS files
 
 info_file <- file.path(
   out_dir,
@@ -89,6 +102,8 @@ message(
   paste(names(trend_data), collapse = ", ")
 )
 
+# Find basin ID and geometry columns
+
 common_columns <- intersect(
   names(catchment_info),
   names(trend_data)
@@ -118,11 +133,13 @@ geometry_column <- "geometry"
 
 if (!geometry_column %in% names(catchment_info)) {
   stop(
-    "No 'geometry' column was found in catchment_info.\n",
+    "No 'geometry' column was found.\n",
     "Available columns are: ",
     paste(names(catchment_info), collapse = ", ")
   )
 }
+
+# Select trend variable
 
 variable_column <- names(trend_data)[
   grepl(
@@ -136,7 +153,9 @@ target_variable <- NULL
 
 if (!is.na(variable_column)) {
   available_variables <- unique(trend_data[[variable_column]])
-  available_variables <- available_variables[!is.na(available_variables)]
+  available_variables <- available_variables[
+    !is.na(available_variables)
+  ]
   
   message(
     "Available trend variables: ",
@@ -153,6 +172,58 @@ if (!is.na(variable_column)) {
     drop = FALSE
   ]
 }
+
+
+# Filter for 1980–2020 when a year column is available
+
+year_candidates <- names(trend_data)[
+  grepl("^year$|_year$|year_", names(trend_data), ignore.case = TRUE)
+]
+
+year_candidates <- year_candidates[
+  vapply(
+    trend_data[year_candidates],
+    is.numeric,
+    logical(1)
+  )
+]
+
+time_filtered <- FALSE
+year_column <- NA_character_
+
+if (length(year_candidates) > 0) {
+  year_column <- year_candidates[1]
+  
+  trend_data <- trend_data[
+    trend_data[[year_column]] >= start_year &
+      trend_data[[year_column]] <= end_year,
+    ,
+    drop = FALSE
+  ]
+  
+  time_filtered <- TRUE
+  
+  message(
+    "Filtered trend data using ",
+    year_column,
+    ": ",
+    time_period
+  )
+} else {
+  warning(
+    "No numeric year column was found. ",
+    "The trend data may already be pre-calculated for a fixed period."
+  )
+}
+
+if (nrow(trend_data) == 0) {
+  stop(
+    "No trend rows remain for the requested period: ",
+    time_period
+  )
+}
+
+# Find numeric trend-value column
 
 trend_candidates <- names(trend_data)[
   grepl(
@@ -175,19 +246,24 @@ if (length(trend_candidates) == 0) {
     vapply(trend_data, is.numeric, logical(1))
   ]
   
+  excluded_columns <- c(basin_column, year_column)
+  
   trend_candidates <- setdiff(
     numeric_columns,
-    basin_column
+    excluded_columns
   )
 }
 
 if (length(trend_candidates) == 0) {
-  stop("No numeric trend value column was found.")
+  stop("No numeric trend-value column was found.")
 }
 
 trend_column <- trend_candidates[1]
 
 message("Mapping trend column: ", trend_column)
+
+
+# Summarise trend values for each catchment
 
 trend_summary <- stats::aggregate(
   trend_data[[trend_column]],
@@ -197,21 +273,43 @@ trend_summary <- stats::aggregate(
 
 names(trend_summary) <- c(basin_column, "trend_value")
 
-map_data <- merge(
-  catchment_info[, c(basin_column, geometry_column), drop = FALSE],
-  trend_summary,
-  by = basin_column
-)
-
-map_data <- map_data[
-  is.finite(map_data$trend_value),
+trend_summary <- trend_summary[
+  is.finite(trend_summary$trend_value),
   ,
   drop = FALSE
+]
+
+if (nrow(trend_summary) == 0) {
+  stop("No valid trend values were found.")
+}
+
+# Join trend values to catchment geometry
+
+catchment_basin_id <- as.character(catchment_info[[basin_column]])
+trend_basin_id <- as.character(trend_summary[[basin_column]])
+
+match_index <- match(
+  catchment_basin_id,
+  trend_basin_id
+)
+
+keep_rows <- !is.na(match_index)
+
+map_data <- catchment_info[
+  keep_rows,
+  ,
+  drop = FALSE
+]
+
+map_data$trend_value <- trend_summary$trend_value[
+  match_index[keep_rows]
 ]
 
 if (nrow(map_data) == 0) {
   stop("No catchment geometries could be joined to trend values.")
 }
+
+# Convert geometry to sf format
 
 if (inherits(map_data[[geometry_column]], "sfc")) {
   map_sf <- sf::st_as_sf(
@@ -226,24 +324,52 @@ if (inherits(map_data[[geometry_column]], "sfc")) {
   )
 } else {
   stop(
-    "The geometry column is not an sf geometry or WKT text column."
+    "The geometry column is not an sf geometry column or WKT text."
   )
 }
 
-# Create map
-title_variable <- if (is.null(target_variable)) {
-  trend_column
-} else {
-  target_variable
+# Remove empty or invalid catchment geometries
+empty_geometry <- sf::st_is_empty(map_sf)
+
+valid_geometry <- sf::st_is_valid(
+  map_sf,
+  NA_on_exception = TRUE
+)
+
+valid_geometry[is.na(valid_geometry)] <- FALSE
+
+map_sf <- map_sf[
+  !empty_geometry & valid_geometry,
+  ,
+  drop = FALSE
+]
+
+if (nrow(map_sf) == 0) {
+  stop("No valid catchment shapes are available for mapping.")
 }
+
+# Use longitude/latitude if the geometry has no CRS information
+if (is.na(sf::st_crs(map_sf))) {
+  warning(
+    "Catchment geometry has no CRS. Assuming WGS84 longitude/latitude."
+  )
+  
+  sf::st_crs(map_sf) <- 4326
+}
+
+map_sf <- sf::st_transform(map_sf, 4326)
+
+
+# Create a visible trend colour scale
 
 trend_values <- map_sf$trend_value
 trend_values <- trend_values[is.finite(trend_values)]
 
 if (length(trend_values) == 0) {
-  stop("No valid trend values are available for the colour scale.")
+  stop("No valid trend values are available for mapping.")
 }
 
+# Limit extreme values so small differences remain visible
 trend_range <- quantile(
   trend_values,
   probs = c(0.02, 0.98),
@@ -264,6 +390,7 @@ if (lower_limit == upper_limit) {
   upper_limit <- upper_limit + adjustment
 }
 
+# Use red-white-blue if values have both negative and positive trends
 if (lower_limit < 0 && upper_limit > 0) {
   max_abs_value <- max(abs(lower_limit), abs(upper_limit))
   
@@ -276,8 +403,14 @@ if (lower_limit < 0 && upper_limit > 0) {
     oob = scales::squish,
     name = "Trend"
   )
+} else if (upper_limit <= 0) {
+  trend_colour_scale <- scale_fill_gradientn(
+    colours = c("#08306B", "#4292C6", "#F7FBFF"),
+    limits = c(lower_limit, upper_limit),
+    oob = scales::squish,
+    name = "Trend"
+  )
 } else {
-
   trend_colour_scale <- scale_fill_gradientn(
     colours = c("#FFFFCC", "#FD8D3C", "#800026"),
     limits = c(lower_limit, upper_limit),
@@ -286,55 +419,7 @@ if (lower_limit < 0 && upper_limit > 0) {
   )
 }
 
-p_map <- ggplot(
-  map_sf,
-  aes(fill = trend_value)
-) +
-  geom_sf(
-    colour = "grey25",
-    linewidth = 0.05
-  ) +
-  trend_colour_scale +
-  labs(
-    title = paste("Annual catchment trend:", title_variable),
-    x = "Longitude",
-    y = "Latitude"
-  ) +
-  theme_minimal()
-
-print(p_map)
-
-# Save map
-output_file <- file.path(
-  output_dir,
-  "catchment_trends.png"
-)
-
-ggsave(
-  output_file,
-  p_map,
-  width = 10,
-  height = 7,
-  dpi = 300
-)
-
-message("Map saved to: ", output_file)
-
-
-# Map the actual catchment boundary shapes
-
-valid_geometry <- sf::st_is_valid(map_sf, NA_on_exception = TRUE)
-valid_geometry[is.na(valid_geometry)] <- FALSE
-
-map_sf <- map_sf[
-  !sf::st_is_empty(map_sf) & valid_geometry,
-  ,
-  drop = FALSE
-]
-
-if (nrow(map_sf) == 0) {
-  stop("No valid catchment shapes are available for mapping.")
-}
+# Map title
 
 title_variable <- if (is.null(target_variable)) {
   trend_column
@@ -342,38 +427,135 @@ title_variable <- if (is.null(target_variable)) {
   target_variable
 }
 
-p_map <- ggplot(
+map_subtitle <- if (time_filtered) {
+  paste("Time period:", time_period)
+} else {
+  "Time period depends on the downloaded pre-calculated trend table"
+}
+
+# Map 1: Catchment boundaries only
+
+p_catchments <- ggplot(
   map_sf,
   aes(fill = trend_value)
 ) +
   geom_sf(
-    colour = "grey25",
+    colour = "grey20",
     linewidth = 0.05
   ) +
   trend_colour_scale +
   labs(
-    title = paste("Annual catchment trend:", title_variable),
+    title = paste("Annual catchment trends:", title_variable),
+    subtitle = map_subtitle,
     x = "Longitude",
     y = "Latitude"
   ) +
   theme_minimal()
 
-print(p_map)
+print(p_catchments)
 
-output_file <- file.path(
+catchment_map_file <- file.path(
   output_dir,
-  "catchment_trends.png"
+  "catchment_trends_1980_2020.png"
 )
 
 ggsave(
-  output_file,
-  p_map,
+  catchment_map_file,
+  p_catchments,
   width = 11,
   height = 8,
   dpi = 300
 )
 
-message("Catchment map saved to: ", output_file)
+message("Catchment map saved to: ", catchment_map_file)
 
 
+# Map 2: Catchments on a country-boundary basemap
 
+if (requireNamespace("rnaturalearth", quietly = TRUE)) {
+  world_map <- rnaturalearth::ne_countries(
+    scale = "medium",
+    returnclass = "sf"
+  )
+  
+  map_bbox <- sf::st_bbox(map_sf)
+  
+  x_padding <- (map_bbox["xmax"] - map_bbox["xmin"]) * 0.08
+  y_padding <- (map_bbox["ymax"] - map_bbox["ymin"]) * 0.08
+  
+  if (x_padding == 0) x_padding <- 0.5
+  if (y_padding == 0) y_padding <- 0.5
+  
+  xmin <- unname(map_bbox["xmin"] - x_padding)
+  xmax <- unname(map_bbox["xmax"] + x_padding)
+  ymin <- unname(map_bbox["ymin"] - y_padding)
+  ymax <- unname(map_bbox["ymax"] + y_padding)
+  
+  p_basemap <- ggplot() +
+    geom_sf(
+      data = world_map,
+      fill = "grey93",
+      colour = "grey55",
+      linewidth = 0.2
+    ) +
+    geom_sf(
+      data = map_sf,
+      aes(fill = trend_value),
+      colour = "grey20",
+      linewidth = 0.05
+    ) +
+    trend_colour_scale +
+    coord_sf(
+      xlim = c(xmin, xmax),
+      ylim = c(ymin, ymax),
+      expand = FALSE
+    ) +
+    labs(
+      title = paste(
+        "Annual catchment trends on geographic map:",
+        title_variable
+      ),
+      subtitle = map_subtitle,
+      x = "Longitude",
+      y = "Latitude"
+    ) +
+    theme_minimal()
+  
+  print(p_basemap)
+  
+  basemap_file <- file.path(
+    output_dir,
+    "catchment_trends_1980_2020_basemap.png"
+  )
+  
+  ggsave(
+    basemap_file,
+    p_basemap,
+    width = 11,
+    height = 8,
+    dpi = 300
+  )
+  
+  message("Basemap version saved to: ", basemap_file)
+} else {
+  message(
+    "Basemap skipped. Install rnaturalearth to create it:\n",
+    "install.packages(c('rnaturalearth', 'rnaturalearthdata'))"
+  )
+}
+
+
+shapefile_file <- file.path(
+  shapefile_dir,
+  "catchment_trends.shp"
+)
+
+sf::st_write(
+  map_sf,
+  shapefile_file,
+  delete_layer = TRUE,
+  quiet = TRUE
+)
+
+message("Catchment shapefile saved to: ", shapefile_file)
+message("Finished.")
