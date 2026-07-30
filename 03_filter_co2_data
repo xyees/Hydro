@@ -1,10 +1,5 @@
-# 03_filter_co2_data.R
-# Find the CO2 dataset and filter it to one basin
-
 out_dir <- "data/raw/zenodo_20479866"
 
-# Leave as NULL to use the first available basin.
-# Or write a basin ID, for example: target_basin <- "12345"
 target_basin <- NULL
 
 if (!dir.exists(out_dir)) {
@@ -12,7 +7,6 @@ if (!dir.exists(out_dir)) {
        ". Run 01_download_data.R first.")
 }
 
-# Find CO2 RDS files
 find_co2_files <- function(folder) {
   all_rds_files <- list.files(
     folder,
@@ -29,7 +23,6 @@ find_co2_files <- function(folder) {
 
 co2_files <- find_co2_files(out_dir)
 
-# If no CO2 RDS file is found, extract ZIP files automatically.
 if (length(co2_files) == 0) {
   zip_files <- list.files(
     out_dir,
@@ -68,7 +61,6 @@ if (length(co2_files) == 0) {
 message("CO2 files found:")
 print(co2_files)
 
-# Use the first CO2 file found
 co2_file <- co2_files[1]
 co2_data <- readRDS(co2_file)
 
@@ -114,7 +106,6 @@ message(
   paste(head(available_basins, 10), collapse = ", ")
 )
 
-# Use the first basin if no specific basin was chosen
 if (is.null(target_basin)) {
   target_basin <- available_basins[1]
 }
@@ -127,7 +118,6 @@ if (!target_basin %in% available_basins) {
   )
 }
 
-# Filter to one basin
 one_basin_data <- co2_data[
   co2_data[[basin_column]] == target_basin,
   ,
@@ -141,7 +131,6 @@ if (nrow(one_basin_data) == 0) {
 message("Selected basin: ", target_basin)
 message("Rows in filtered data: ", nrow(one_basin_data))
 
-# Save filtered data
 safe_basin_name <- gsub(
   "[^A-Za-z0-9_-]",
   "_",
