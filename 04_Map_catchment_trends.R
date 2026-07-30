@@ -11,10 +11,8 @@ start_year <- 1980
 end_year <- 2020
 time_period <- paste0(start_year, "–", end_year)
 
-# Allow sufficient time for large Zenodo downloads
-options(timeout = 3600)
+options(timeout = 360)
 
-# Folders
 out_dir <- paste0("data/raw/zenodo_", record_id)
 output_dir <- "outputs/catchment_trends"
 shapefile_dir <- file.path(output_dir, "catchment_shapefile")
