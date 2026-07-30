@@ -1,9 +1,3 @@
-# 03_analyse_co2.R
-# Analyse one filtered CO2 basin
-
-# Install once if needed:
-# install.packages("ggplot2")
-
 library(ggplot2)
 
 out_dir <- "data/raw/zenodo_20479866"
@@ -14,11 +8,8 @@ plot_dir <- file.path(analysis_dir, "plots")
 dir.create(analysis_dir, showWarnings = FALSE, recursive = TRUE)
 dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
 
-# Leave as NULL to use the first filtered basin file.
-# Or choose a basin ID that matches the saved file name.
 target_basin <- NULL
 
-# Find the filtered one-basin file
 if (is.null(target_basin)) {
   filtered_files <- list.files(
     out_dir,
@@ -59,12 +50,9 @@ message("Using file: ", filtered_file)
 message("Rows: ", nrow(one_basin_data))
 message("Columns: ", paste(names(one_basin_data), collapse = ", "))
 
-# Long-format columns
 variable_column <- "variable"
 value_column <- "values"
 
-# Leave as NULL to use the first available variable.
-# Example: target_variable <- "pre"
 target_variable <- NULL
 
 if (!all(c(variable_column, value_column) %in% names(one_basin_data))) {
@@ -100,7 +88,6 @@ if (!target_variable %in% available_variables) {
   )
 }
 
-# Select the chosen variable
 co2_data <- one_basin_data[
   one_basin_data[[variable_column]] == target_variable,
   ,
@@ -140,7 +127,6 @@ write.csv(statistics, output_csv, row.names = FALSE)
 
 message("Statistics saved to: ", output_csv)
 
-# Basin label for plot titles
 basin_candidates <- names(one_basin_data)[
   grepl(
     "basin|catchment|gauge|station",
@@ -346,7 +332,7 @@ if (nrow(fraction_data) > 0) {
   )
 }
 
-# 4. Basin map if coordinates are present
+# 4. Basin map
 longitude_candidates <- c("longitude", "lon", "long", "x")
 latitude_candidates <- c("latitude", "lat", "y")
 
