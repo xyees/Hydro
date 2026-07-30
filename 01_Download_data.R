@@ -1,4 +1,3 @@
-# 01_download_data.R
 # Download data from Zenodo
 
 library(jsonlite)
