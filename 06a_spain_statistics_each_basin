@@ -1,5 +1,4 @@
-# Analyse all catchments located in Spain:
-# statistics, time series, scatterplots, fractional plots, and a map.
+# All catchments located in Spain:
 
 library(ggplot2)
 library(sf)
@@ -267,9 +266,6 @@ if (time_filtered) {
     "The analysis uses the full available time period."
   )
 }
-
-
-# Select variables
 
 available_variables <- unique(spain_data[[variable_column]])
 available_variables <- available_variables[
