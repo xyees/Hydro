@@ -1,0 +1,437 @@
+# Analyse all catchments located in Spain:
+# statistics, time series, scatterplots, fractional plots, and a map.
+
+library(ggplot2)
+library(sf)
+
+co2_data_dir <- "data/raw/zenodo_20479866"
+
+catchment_file <- file.path(
+  "data/raw",
+  "zenodo_21223242",
+  "catchment_info_table.rds"
+)
+
+output_dir <- "outputs/spain_basin_analysis"
+
+start_year <- 1980
+end_year <- 2020
+
+input_file <- NULL
+
+target_variable <- NULL
+
+scatter_x_variable <- NULL
+
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(
+  file.path(output_dir, "plots"),
+  showWarnings = FALSE,
+  recursive = TRUE
+)
+
+if (is.null(input_file)) {
+  rds_files <- list.files(
+    co2_data_dir,
+    pattern = "\\.rds$",
+    full.names = TRUE,
+    recursive = TRUE,
+    ignore.case = TRUE
+  )
+  
+  co2_files <- rds_files[
+    grepl("co2", basename(rds_files), ignore.case = TRUE) &
+      !grepl("^co2_one_basin_", basename(rds_files), ignore.case = TRUE)
+  ]
+  
+  if (length(co2_files) == 0) {
+    stop(
+      "No all-basin CO2 RDS file was found.\n",
+      "Set input_file manually at the top of this script."
+    )
+  }
+  
+  input_file <- co2_files[1]
+}
+
+if (!file.exists(input_file)) {
+  stop("CO2 data file was not found: ", input_file)
+}
+
+hydro_data <- as.data.frame(readRDS(input_file))
+
+message("Using CO2 data file: ", input_file)
+message("CO2 data columns: ", paste(names(hydro_data), collapse = ", "))
+
+basin_candidates <- names(hydro_data)[
+  grepl(
+    "basin|catchment|gauge|station",
+    names(hydro_data),
+    ignore.case = TRUE
+  )
+]
+
+if (length(basin_candidates) == 0) {
+  stop("No basin column was found in the CO2 data.")
+}
+
+basin_column <- basin_candidates[1]
+
+variable_column <- "variable"
+value_column <- "values"
+
+if (!variable_column %in% names(hydro_data) ||
+    !value_column %in% names(hydro_data)) {
+  stop(
+    "Expected columns 'variable' and 'values' were not found.\n",
+    "Available columns: ",
+    paste(names(hydro_data), collapse = ", ")
+  )
+}
+
+if (!is.numeric(hydro_data[[value_column]])) {
+  stop("Column 'values' must be numeric.")
+}
+
+if (!file.exists(catchment_file)) {
+  stop(
+    "Catchment information file was not found:\n",
+    catchment_file,
+    "\nRun 04_map_catchment_trends.R first."
+  )
+}
+
+catchment_info <- as.data.frame(readRDS(catchment_file))
+
+message(
+  "Catchment columns: ",
+  paste(names(catchment_info), collapse = ", ")
+)
+
+catchment_basin_column <- "basin"
+geometry_column <- "geometry"
+
+if (!catchment_basin_column %in% names(catchment_info)) {
+  stop("Column 'basin' was not found in catchment information.")
+}
+
+if (!geometry_column %in% names(catchment_info)) {
+  stop("Column 'geometry' was not found in catchment information.")
+}
+
+if (!requireNamespace("rnaturalearth", quietly = TRUE)) {
+  stop(
+    "Install required map packages first:\n",
+    "install.packages(c('rnaturalearth', 'rnaturalearthdata'))"
+  )
+}
+
+if (inherits(catchment_info[[geometry_column]], "sfc")) {
+  catchment_sf <- sf::st_as_sf(
+    catchment_info,
+    sf_column_name = geometry_column
+  )
+} else if (is.character(catchment_info[[geometry_column]])) {
+  catchment_sf <- sf::st_as_sf(
+    catchment_info,
+    wkt = geometry_column,
+    crs = 4326
+  )
+} else {
+  stop("Catchment geometry is not sf geometry or WKT text.")
+}
+
+if (is.na(sf::st_crs(catchment_sf))) {
+  sf::st_crs(catchment_sf) <- 4326
+}
+
+catchment_sf <- sf::st_transform(catchment_sf, 4326)
+
+spain_boundary <- rnaturalearth::ne_countries(
+  country = "Spain",
+  scale = "medium",
+  returnclass = "sf"
+)
+
+spain_boundary <- sf::st_transform(spain_boundary, 4326)
+
+catchment_centres <- suppressWarnings(
+  sf::st_point_on_surface(catchment_sf)
+)
+
+spain_index <- lengths(
+  sf::st_within(catchment_centres, spain_boundary)
+) > 0
+
+spain_catchments <- catchment_sf[
+  spain_index,
+  ,
+  drop = FALSE
+]
+
+if (nrow(spain_catchments) == 0) {
+  stop("No catchments were found inside Spain.")
+}
+
+spain_basin_ids <- as.character(
+  spain_catchments[[catchment_basin_column]]
+)
+
+message("Spanish catchments found: ", length(spain_basin_ids))
+
+spain_data <- hydro_data[
+  as.character(hydro_data[[basin_column]]) %in% spain_basin_ids,
+  ,
+  drop = FALSE
+]
+
+if (nrow(spain_data) == 0) {
+  stop(
+    "No CO2 observations matched the Spanish catchment basin IDs.\n",
+    "CO2 basin column: ", basin_column,
+    "\nCatchment basin column: ", catchment_basin_column
+  )
+}
+
+message("Spanish CO2 rows found: ", nrow(spain_data))
+
+
+# Filter the period 1980–2020
+
+date_candidates <- names(spain_data)[
+  grepl(
+    "^date$|^time$|date_time|datetime",
+    names(spain_data),
+    ignore.case = TRUE
+  )
+]
+
+year_candidates <- names(spain_data)[
+  grepl(
+    "^year$|_year$|year_",
+    names(spain_data),
+    ignore.case = TRUE
+  )
+]
+
+time_filtered <- FALSE
+spain_data$plot_time <- as.Date(NA)
+
+if (length(date_candidates) > 0) {
+  date_column <- date_candidates[1]
+  
+  spain_data$plot_time <- as.Date(
+    as.character(spain_data[[date_column]])
+  )
+  
+  if (!all(is.na(spain_data$plot_time))) {
+    spain_data <- spain_data[
+      spain_data$plot_time >= as.Date("1980-01-01") &
+        spain_data$plot_time <= as.Date("2020-12-31"),
+      ,
+      drop = FALSE
+    ]
+    
+    time_filtered <- TRUE
+  }
+}
+
+if (!time_filtered && length(year_candidates) > 0) {
+  year_column <- year_candidates[1]
+  
+  if (is.numeric(spain_data[[year_column]])) {
+    spain_data <- spain_data[
+      spain_data[[year_column]] >= start_year &
+        spain_data[[year_column]] <= end_year,
+      ,
+      drop = FALSE
+    ]
+    
+    spain_data$plot_time <- as.Date(
+      paste0(spain_data[[year_column]], "-01-01")
+    )
+    
+    time_filtered <- TRUE
+  }
+}
+
+if (nrow(spain_data) == 0) {
+  stop("No Spanish observations remain after filtering 1980–2020.")
+}
+
+if (time_filtered) {
+  message("Data filtered to 1980–2020.")
+} else {
+  warning(
+    "No readable date or numeric year column was found. ",
+    "The analysis uses the full available time period."
+  )
+}
+
+
+# Select variables
+
+available_variables <- unique(spain_data[[variable_column]])
+available_variables <- available_variables[
+  !is.na(available_variables)
+]
+
+if (length(available_variables) == 0) {
+  stop("No variables were found in the Spanish CO2 data.")
+}
+
+if (is.null(target_variable)) {
+  co2_name <- available_variables[
+    tolower(as.character(available_variables)) == "co2"
+  ]
+  
+  if (length(co2_name) > 0) {
+    target_variable <- co2_name[1]
+  } else {
+    target_variable <- available_variables[1]
+  }
+}
+
+if (!target_variable %in% available_variables) {
+  stop(
+    "Target variable was not found: ", target_variable,
+    "\nAvailable variables: ",
+    paste(available_variables, collapse = ", ")
+  )
+}
+
+if (is.null(scatter_x_variable)) {
+  other_variables <- setdiff(
+    available_variables,
+    target_variable
+  )
+  
+  if (length(other_variables) > 0) {
+    scatter_x_variable <- other_variables[1]
+  }
+}
+
+message("Target variable: ", target_variable)
+
+if (!is.null(scatter_x_variable)) {
+  message("Scatterplot variable: ", scatter_x_variable)
+}
+
+
+# Statistics for every Spanish basin and variable
+
+basins <- unique(spain_data[[basin_column]])
+
+statistics_list <- list()
+counter <- 1
+
+for (basin_id in basins) {
+  for (variable_name in available_variables) {
+    x <- spain_data[
+      spain_data[[basin_column]] == basin_id &
+        spain_data[[variable_column]] == variable_name,
+      value_column
+    ]
+    
+    valid_x <- x[!is.na(x)]
+    
+    statistics_list[[counter]] <- data.frame(
+      basin = as.character(basin_id),
+      variable = as.character(variable_name),
+      n = length(x),
+      missing_values = sum(is.na(x)),
+      mean = if (length(valid_x) > 0) mean(valid_x) else NA_real_,
+      median = if (length(valid_x) > 0) median(valid_x) else NA_real_,
+      min = if (length(valid_x) > 0) min(valid_x) else NA_real_,
+      max = if (length(valid_x) > 0) max(valid_x) else NA_real_,
+      range = if (length(valid_x) > 0) max(valid_x) - min(valid_x) else NA_real_,
+      q25 = if (length(valid_x) > 0) unname(quantile(valid_x, 0.25)) else NA_real_,
+      q50 = if (length(valid_x) > 0) unname(quantile(valid_x, 0.50)) else NA_real_,
+      q75 = if (length(valid_x) > 0) unname(quantile(valid_x, 0.75)) else NA_real_
+    )
+    
+    counter <- counter + 1
+  }
+}
+
+statistics_table <- do.call(rbind, statistics_list)
+
+write.csv(
+  statistics_table,
+  file.path(output_dir, "spain_basin_statistics.csv"),
+  row.names = FALSE
+)
+
+message("Statistics saved.")
+
+
+# Time series, scatterplot, and stacked-bar plot for each basin
+
+for (basin_id in basins) {
+  safe_basin <- gsub(
+    "[^A-Za-z0-9_-]",
+    "_",
+    as.character(basin_id)
+  )
+  
+  basin_output_dir <- file.path(
+    output_dir,
+    "plots",
+    safe_basin
+  )
+  
+  dir.create(
+    basin_output_dir,
+    showWarnings = FALSE,
+    recursive = TRUE
+  )
+  
+  basin_data <- spain_data[
+    spain_data[[basin_column]] == basin_id,
+    ,
+    drop = FALSE
+  ]
+  
+  target_data <- basin_data[
+    basin_data[[variable_column]] == target_variable,
+    ,
+    drop = FALSE
+  ]
+  
+  # Time series
+  
+  if (time_filtered &&
+      nrow(target_data) > 0 &&
+      !all(is.na(target_data$plot_time))) {
+    
+    p_time <- ggplot(
+      target_data,
+      aes(x = plot_time, y = .data[[value_column]])
+    ) +
+      geom_line(
+        colour = "steelblue",
+        linewidth = 0.35,
+        na.rm = TRUE
+      ) +
+      labs(
+        title = paste(
+          target_variable,
+          "time series — Spain basin",
+          basin_id
+        ),
+        subtitle = "1980–2020",
+        x = "Date",
+        y = target_variable
+      ) +
+      theme_minimal()
+    
+    ggsave(
+      file.path(basin_output_dir, "timeseries.png"),
+      p_time,
+      width = 10,
+      height = 5,
+      dpi = 300
+    )
+  }
+  
+
