@@ -1,0 +1,37 @@
+# Time series
+
+if (time_filtered &&
+    nrow(target_data) > 0 &&
+    !all(is.na(target_data$plot_time))) {
+  
+  p_time <- ggplot(
+    target_data,
+    aes(x = plot_time, y = .data[[value_column]])
+  ) +
+    geom_line(
+      colour = "steelblue",
+      linewidth = 0.35,
+      na.rm = TRUE
+    ) +
+    labs(
+      title = paste(
+        target_variable,
+        "time series — Spain basin",
+        basin_id
+      ),
+      subtitle = "1980–2020",
+      x = "Date",
+      y = target_variable
+    ) +
+    theme_minimal()
+  
+  ggsave(
+    file.path(basin_output_dir, "timeseries.png"),
+    p_time,
+    width = 10,
+    height = 5,
+    dpi = 300
+  )
+}
+
+
