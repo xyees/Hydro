@@ -1,0 +1,286 @@
+# Checking the number and types of catchments and inspect the downloaded data.
+
+raw_folder <- "data/raw"
+output_folder <- "results/tables"
+
+dir.create(output_folder, recursive = TRUE, showWarnings = FALSE)
+
+if (!dir.exists(raw_folder)) {
+  stop(
+    "Folder data/raw does not exist.\n",
+    "Run R/01_download_zenodo.R before running this script."
+  )
+}
+
+all_files <- list.files(
+  raw_folder,
+  recursive = TRUE,
+  full.names = TRUE,
+  all.files = FALSE
+)
+
+all_files <- all_files[!file.info(all_files)$isdir]
+
+if (length(all_files) == 0) {
+  stop("No downloaded files were found in data/raw.")
+}
+
+find_download <- function(file_name) {
+  matches <- all_files[basename(all_files) == file_name]
+  
+  if (length(matches) == 0) {
+    return(character())
+  }
+  
+  # Prefer the latest Zenodo record when duplicate filenames exist.
+  latest <- matches[grepl("zenodo_21223242", matches, fixed = TRUE)]
+  if (length(latest) > 0) latest[1] else matches[1]
+}
+
+safe_read_rds <- function(path) {
+  tryCatch(
+    readRDS(path),
+    error = function(error) {
+      message("Could not read ", path, ": ", error$message)
+      NULL
+    }
+  )
+}
+
+report_file <- file.path(output_folder, "catchment_and_data_report.txt")
+sink(report_file, append = FALSE, split = TRUE)
+
+close_report <- function() {
+  if (sink.number(type = "output") > 0) {
+    sink(type = "output")
+  }
+}
+
+tryCatch({
+  cat("===== CATCHMENT AND DATA CHECK =====\n")
+  cat("Generated: ", format(Sys.time()), "\n\n", sep = "")
+  
+  information <- file.info(all_files)
+  file_inventory <- data.frame(
+    file_path = all_files,
+    file_name = basename(all_files),
+    extension = tolower(tools::file_ext(all_files)),
+    size_mb = round(information$size / 1024^2, 3),
+    stringsAsFactors = FALSE
+  )
+  
+  file_inventory$extension[file_inventory$extension == ""] <- "(none)"
+  file_inventory <- file_inventory[
+    order(file_inventory$extension, file_inventory$file_name),
+  ]
+  
+  write.csv(
+    file_inventory,
+    file.path(output_folder, "all_data_files.csv"),
+    row.names = FALSE,
+    na = ""
+  )
+  
+  file_type_summary <- aggregate(
+    size_mb ~ extension,
+    data = file_inventory,
+    FUN = sum
+  )
+  file_type_summary$file_count <- as.integer(table(file_inventory$extension)[
+    file_type_summary$extension
+  ])
+  file_type_summary <- file_type_summary[
+    , c("extension", "file_count", "size_mb")
+  ]
+  names(file_type_summary)[3] <- "total_size_mb"
+  
+  cat("----- Files by type -----\n")
+  print(file_type_summary, row.names = FALSE)
+  cat("\n")
+
+  catchment_file <- find_download("catchment_info_table.rds")
+  
+  if (length(catchment_file) == 0) {
+    cat("catchment_info_table.rds was not found.\n\n")
+  } else {
+    catchments <- safe_read_rds(catchment_file)
+    
+    if (!is.null(catchments)) {
+      catchments <- as.data.frame(catchments)
+      
+      cat("----- Catchment table -----\n")
+      cat("File: ", catchment_file, "\n", sep = "")
+      cat("Rows/geometries: ", nrow(catchments), "\n", sep = "")
+      cat("Columns: ", paste(names(catchments), collapse = ", "), "\n", sep = "")
+      
+      if (!"basin" %in% names(catchments)) {
+        cat("A column named 'basin' was not found.\n\n")
+      } else {
+        valid_basin <- !is.na(catchments$basin)
+        number_of_catchments <- length(unique(catchments$basin[valid_basin]))
+        
+        cat("Unique catchments: ", number_of_catchments, "\n", sep = "")
+        cat(
+          "Repeated geometry rows: ",
+          nrow(catchments) - number_of_catchments,
+          "\n",
+          sep = ""
+        )
+        
+        # Keep one row per basin so multipart geometries are not double-counted.
+        unique_catchments <- catchments[
+          !duplicated(catchments$basin) & valid_basin,
+        ]
+        
+        if ("basin_type" %in% names(unique_catchments)) {
+          catchment_type_summary <- as.data.frame(
+            table(
+              catchment_type = unique_catchments$basin_type,
+              useNA = "ifany"
+            ),
+            stringsAsFactors = FALSE
+          )
+          names(catchment_type_summary)[2] <- "catchment_count"
+          catchment_type_summary <- catchment_type_summary[
+            catchment_type_summary$catchment_count > 0,
+          ]
+          
+          cat("\nCatchments by type:\n")
+          print(catchment_type_summary, row.names = FALSE)
+          
+          write.csv(
+            catchment_type_summary,
+            file.path(output_folder, "catchment_counts_by_type.csv"),
+            row.names = FALSE,
+            na = ""
+          )
+        }
+        
+        catchment_columns <- intersect(
+          c("basin", "basin_type", "area"),
+          names(unique_catchments)
+        )
+        
+        write.csv(
+          unique_catchments[, catchment_columns, drop = FALSE],
+          file.path(output_folder, "unique_catchments.csv"),
+          row.names = FALSE,
+          na = ""
+        )
+      }
+      
+      if (all(c("basin", "area") %in% names(catchments))) {
+        area_data <- catchments[
+          !duplicated(catchments$basin),
+          "area",
+          drop = TRUE
+        ]
+        cat("\nCatchment-area summary (units as supplied by dataset):\n")
+        print(summary(area_data))
+      }
+      
+      cat("\n")
+    }
+  }
+  
+  trend_file <- find_download("trend_annual_pre_aet_q_q_surf_tws.rds")
+  
+  if (length(trend_file) == 0) {
+    cat("trend_annual_pre_aet_q_q_surf_tws.rds was not found.\n\n")
+  } else {
+    trends <- safe_read_rds(trend_file)
+    
+    if (!is.null(trends)) {
+      cat("----- Annual hydrological trends -----\n")
+      cat("File: ", trend_file, "\n", sep = "")
+      cat("Class: ", paste(class(trends), collapse = ", "), "\n", sep = "")
+      cat("Dimensions: ", paste(dim(trends), collapse = " x "), "\n", sep = "")
+      
+      if (!is.null(names(trends))) {
+        cat("Variables: ", paste(names(trends), collapse = ", "), "\n", sep = "")
+      }
+      
+      cat("\nStructure:\n")
+      str(trends, max.level = 1, give.attr = FALSE)
+      
+      if (is.data.frame(trends)) {
+        write.csv(
+          as.data.frame(trends),
+          file.path(output_folder, "annual_hydrological_trends.csv"),
+          row.names = FALSE,
+          na = ""
+        )
+      }
+      
+      cat("\n")
+    }
+  }
+  
+  attribute_file <- find_download(
+    "chamtent_elevation_area_biom_kg_claases_information.rds"
+  )
+  
+  if (length(attribute_file) > 0) {
+    attributes_data <- safe_read_rds(attribute_file)
+    
+    if (!is.null(attributes_data)) {
+      cat("----- Additional catchment attributes -----\n")
+      cat("File: ", attribute_file, "\n", sep = "")
+      cat(
+        "Class: ",
+        paste(class(attributes_data), collapse = ", "),
+        "\n",
+        sep = ""
+      )
+      cat(
+        "Dimensions: ",
+        paste(dim(attributes_data), collapse = " x "),
+        "\n",
+        sep = ""
+      )
+      
+      if (!is.null(names(attributes_data))) {
+        cat(
+          "Variables: ",
+          paste(names(attributes_data), collapse = ", "),
+          "\n",
+          sep = ""
+        )
+      }
+      
+      cat("\n")
+    }
+  }
+  
+  variable_dictionary <- data.frame(
+    abbreviation = c("pre", "pet", "aet", "q", "q_surf", "tws"),
+    meaning = c(
+      "Precipitation",
+      "Potential evapotranspiration",
+      "Actual evapotranspiration",
+      "Total runoff or discharge",
+      "Surface runoff",
+      "Total water storage"
+    ),
+    stringsAsFactors = FALSE
+  )
+  
+  write.csv(
+    variable_dictionary,
+    file.path(output_folder, "hydrological_variable_dictionary.csv"),
+    row.names = FALSE
+  )
+  
+  cat("----- Hydrological variable dictionary -----\n")
+  print(variable_dictionary, row.names = FALSE)
+  cat("\nCheck complete.\n")
+}, finally = {
+  close_report()
+})
+
+message("Saved report: ", report_file)
+message("Saved tables in: ", output_folder)
+
+if (!file.exists(report_file) || file.info(report_file)$size == 0) {
+  stop("The report file was not written successfully: ", report_file)
+}
