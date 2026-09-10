@@ -1,433 +1,591 @@
-# All catchments located in Spain:
+# Annual, seasonal and daily-quantile trends for basin 6340620
+# Focus: precipitation, AET and PM_CO2 PET
 
+project_folder <- paste0(
+  "C:/Users/Shwe Yee Win/",
+  "OneDrive - CZU v Praze/Hydro_thesis"
+)
+
+basin_number <- "6340620"
+
+if (!dir.exists(project_folder)) {
+  stop("Project folder was not found:\n", project_folder)
+}
+
+setwd(project_folder)
+
+cat("Working folder:\n", getwd(), "\n\n")
+
+required_packages <- c(
+  "data.table",
+  "ggplot2",
+  "quantreg",
+  "trend",
+  "Kendall"
+)
+
+missing_packages <- required_packages[
+  !vapply(
+    required_packages,
+    requireNamespace,
+    logical(1),
+    quietly = TRUE
+  )
+]
+
+if (length(missing_packages) > 0) {
+  install.packages(
+    missing_packages,
+    repos = "https://cloud.r-project.org"
+  )
+}
+
+library(data.table)
 library(ggplot2)
-library(sf)
+library(quantreg)
+library(trend)
+library(Kendall)
 
-co2_data_dir <- "data/raw/zenodo_20479866"
 
-catchment_file <- file.path(
-  "data/raw",
-  "zenodo_21223242",
-  "catchment_info_table.rds"
+file_pattern <- paste0(
+  "^basin_",
+  basin_number,
+  "_pet_co2_daily_water_balance[.]rds$"
 )
 
-output_dir <- "outputs/spain_basin_analysis"
-
-start_year <- 1980
-end_year <- 2020
-
-input_file <- NULL
-
-target_variable <- NULL
-
-scatter_x_variable <- NULL
-
-dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
-dir.create(
-  file.path(output_dir, "plots"),
-  showWarnings = FALSE,
-  recursive = TRUE
+basin_files <- list.files(
+  path = project_folder,
+  pattern = file_pattern,
+  recursive = TRUE,
+  full.names = TRUE
 )
 
-if (is.null(input_file)) {
-  rds_files <- list.files(
-    co2_data_dir,
-    pattern = "\\.rds$",
-    full.names = TRUE,
-    recursive = TRUE,
-    ignore.case = TRUE
+if (length(basin_files) == 0) {
+  stop(
+    "The daily water-balance file was not found for basin ",
+    basin_number,
+    "."
+  )
+}
+
+# If duplicate copies exist, use the shortest path.
+basin_files <- basin_files[order(nchar(basin_files))]
+input_file <- basin_files[1]
+
+cat("Input file:\n", input_file, "\n\n")
+
+daily_data <- as.data.table(readRDS(input_file))
+
+required_columns <- c(
+  "date",
+  "pre",
+  "aet",
+  "pet",
+  "qsim",
+  "q_surf",
+  "tws",
+  "delta_tws",
+  "residual"
+)
+
+missing_columns <- setdiff(
+  required_columns,
+  names(daily_data)
+)
+
+if (length(missing_columns) > 0) {
+  stop(
+    "These columns are missing:\n",
+    paste(missing_columns, collapse = ", "),
+    "\n\nAvailable columns:\n",
+    paste(names(daily_data), collapse = ", ")
+  )
+}
+
+daily_data[, date := as.Date(date)]
+setorder(daily_data, date)
+
+cat("First date:", as.character(min(daily_data$date)), "\n")
+cat("Last date: ", as.character(max(daily_data$date)), "\n")
+cat("Number of daily records:", nrow(daily_data), "\n\n")
+
+analysis_data <- daily_data[, .(
+  date,
+  P = pre,
+  AET = aet,
+  PM_CO2_PET = pet
+)]
+
+# The trend analysis focuses only on these three variables.
+component_names <- c(
+  "P",
+  "AET",
+  "PM_CO2_PET"
+)
+
+get_season <- function(month_number) {
+  seasons <- c(
+    "DJF", "DJF",
+    "MAM", "MAM", "MAM",
+    "JJA", "JJA", "JJA",
+    "SON", "SON", "SON",
+    "DJF"
   )
   
-  co2_files <- rds_files[
-    grepl("co2", basename(rds_files), ignore.case = TRUE) &
-      !grepl("^co2_one_basin_", basename(rds_files), ignore.case = TRUE)
-  ]
-  
-  if (length(co2_files) == 0) {
-    stop(
-      "No all-basin CO2 RDS file was found.\n",
-      "Set input_file manually at the top of this script."
-    )
-  }
-  
-  input_file <- co2_files[1]
+  seasons[month_number]
 }
 
-if (!file.exists(input_file)) {
-  stop("CO2 data file was not found: ", input_file)
+get_season_year <- function(date) {
+  year_number <- as.integer(format(date, "%Y"))
+  is_december <- format(date, "%m") == "12"
+  
+  year_number + is_december
 }
 
-hydro_data <- as.data.frame(readRDS(input_file))
+analysis_data[, year := as.integer(format(date, "%Y"))]
+analysis_data[, month := as.integer(format(date, "%m"))]
+analysis_data[, season := get_season(month)]
+analysis_data[, season_year := get_season_year(date)]
 
-message("Using CO2 data file: ", input_file)
-message("CO2 data columns: ", paste(names(hydro_data), collapse = ", "))
+year_check <- analysis_data[, .(
+  observed_days = .N,
+  expected_days = as.integer(
+    as.Date(paste0(year + 1, "-01-01")) -
+      as.Date(paste0(year, "-01-01"))
+  )
+), by = year]
 
-basin_candidates <- names(hydro_data)[
-  grepl(
-    "basin|catchment|gauge|station",
-    names(hydro_data),
-    ignore.case = TRUE
+complete_years <- year_check[
+  observed_days == expected_days,
+  year
+]
+
+if (length(complete_years) == 0) {
+  stop("No complete calendar years were found.")
+}
+
+analysis_data <- analysis_data[
+  year %in% complete_years
+]
+
+cat(
+  "Complete years:",
+  min(complete_years),
+  "to",
+  max(complete_years),
+  "\n\n"
+)
+
+long_data <- melt(
+  analysis_data,
+  id.vars = c(
+    "date",
+    "year",
+    "month",
+    "season",
+    "season_year"
+  ),
+  measure.vars = component_names,
+  variable.name = "component",
+  value.name = "daily_value"
+)
+
+long_data[, component := as.character(component)]
+
+
+# Annual totals
+
+# P, AET and PET are daily fluxes in mm/day.
+# Summing daily values gives annual totals in mm/year.
+
+annual_data <- long_data[
+  is.finite(daily_value),
+  .(
+    annual_value_mm = sum(daily_value)
+  ),
+  by = .(
+    year,
+    component
   )
 ]
 
-if (length(basin_candidates) == 0) {
-  stop("No basin column was found in the CO2 data.")
-}
+setorder(annual_data, component, year)
 
-basin_column <- basin_candidates[1]
 
-variable_column <- "variable"
-value_column <- "values"
+# easonal totals
 
-if (!variable_column %in% names(hydro_data) ||
-    !value_column %in% names(hydro_data)) {
-  stop(
-    "Expected columns 'variable' and 'values' were not found.\n",
-    "Available columns: ",
-    paste(names(hydro_data), collapse = ", ")
-  )
-}
+# December belongs to the following DJF season year.
+# Remove incomplete seasons at the beginning and end of the series.
 
-if (!is.numeric(hydro_data[[value_column]])) {
-  stop("Column 'values' must be numeric.")
-}
-
-if (!file.exists(catchment_file)) {
-  stop(
-    "Catchment information file was not found:\n",
-    catchment_file,
-    "\nRun 04_map_catchment_trends.R first."
-  )
-}
-
-catchment_info <- as.data.frame(readRDS(catchment_file))
-
-message(
-  "Catchment columns: ",
-  paste(names(catchment_info), collapse = ", ")
+season_month_check <- unique(
+  long_data[, .(
+    season_year,
+    season,
+    month
+  )]
 )
 
-catchment_basin_column <- "basin"
-geometry_column <- "geometry"
-
-if (!catchment_basin_column %in% names(catchment_info)) {
-  stop("Column 'basin' was not found in catchment information.")
-}
-
-if (!geometry_column %in% names(catchment_info)) {
-  stop("Column 'geometry' was not found in catchment information.")
-}
-
-if (!requireNamespace("rnaturalearth", quietly = TRUE)) {
-  stop(
-    "Install required map packages first:\n",
-    "install.packages(c('rnaturalearth', 'rnaturalearthdata'))"
-  )
-}
-
-if (inherits(catchment_info[[geometry_column]], "sfc")) {
-  catchment_sf <- sf::st_as_sf(
-    catchment_info,
-    sf_column_name = geometry_column
-  )
-} else if (is.character(catchment_info[[geometry_column]])) {
-  catchment_sf <- sf::st_as_sf(
-    catchment_info,
-    wkt = geometry_column,
-    crs = 4326
-  )
-} else {
-  stop("Catchment geometry is not sf geometry or WKT text.")
-}
-
-if (is.na(sf::st_crs(catchment_sf))) {
-  sf::st_crs(catchment_sf) <- 4326
-}
-
-catchment_sf <- sf::st_transform(catchment_sf, 4326)
-
-spain_boundary <- rnaturalearth::ne_countries(
-  country = "Spain",
-  scale = "medium",
-  returnclass = "sf"
-)
-
-spain_boundary <- sf::st_transform(spain_boundary, 4326)
-
-catchment_centres <- suppressWarnings(
-  sf::st_point_on_surface(catchment_sf)
-)
-
-spain_index <- lengths(
-  sf::st_within(catchment_centres, spain_boundary)
-) > 0
-
-spain_catchments <- catchment_sf[
-  spain_index,
+complete_seasons <- season_month_check[
   ,
-  drop = FALSE
+  .(number_of_months = uniqueN(month)),
+  by = .(
+    season_year,
+    season
+  )
+][
+  number_of_months == 3
 ]
 
-if (nrow(spain_catchments) == 0) {
-  stop("No catchments were found inside Spain.")
-}
-
-spain_basin_ids <- as.character(
-  spain_catchments[[catchment_basin_column]]
+seasonal_long_data <- merge(
+  long_data,
+  complete_seasons[, .(
+    season_year,
+    season
+  )],
+  by = c(
+    "season_year",
+    "season"
+  )
 )
 
-message("Spanish catchments found: ", length(spain_basin_ids))
-
-spain_data <- hydro_data[
-  as.character(hydro_data[[basin_column]]) %in% spain_basin_ids,
-  ,
-  drop = FALSE
-]
-
-if (nrow(spain_data) == 0) {
-  stop(
-    "No CO2 observations matched the Spanish catchment basin IDs.\n",
-    "CO2 basin column: ", basin_column,
-    "\nCatchment basin column: ", catchment_basin_column
-  )
-}
-
-message("Spanish CO2 rows found: ", nrow(spain_data))
-
-
-# Filter the period 1980–2020
-
-date_candidates <- names(spain_data)[
-  grepl(
-    "^date$|^time$|date_time|datetime",
-    names(spain_data),
-    ignore.case = TRUE
+seasonal_data <- seasonal_long_data[
+  is.finite(daily_value),
+  .(
+    seasonal_value_mm = sum(daily_value)
+  ),
+  by = .(
+    year = season_year,
+    season,
+    component
   )
 ]
 
-year_candidates <- names(spain_data)[
-  grepl(
-    "^year$|_year$|year_",
-    names(spain_data),
-    ignore.case = TRUE
-  )
-]
+setorder(
+  seasonal_data,
+  component,
+  season,
+  year
+)
 
-time_filtered <- FALSE
-spain_data$plot_time <- as.Date(NA)
+# Sen slope and Mann-Kendall function
 
-if (length(date_candidates) > 0) {
-  date_column <- date_candidates[1]
+calculate_sen_mk <- function(values, years) {
   
-  spain_data$plot_time <- as.Date(
-    as.character(spain_data[[date_column]])
-  )
+  valid <- is.finite(values) & is.finite(years)
   
-  if (!all(is.na(spain_data$plot_time))) {
-    spain_data <- spain_data[
-      spain_data$plot_time >= as.Date("1980-01-01") &
-        spain_data$plot_time <= as.Date("2020-12-31"),
-      ,
-      drop = FALSE
-    ]
-    
-    time_filtered <- TRUE
+  values <- values[valid]
+  years <- years[valid]
+  
+  if (length(values) < 10) {
+    return(data.table(
+      number_of_years = length(values),
+      sen_slope_per_year = NA_real_,
+      sen_slope_per_decade = NA_real_,
+      mann_kendall_p_value = NA_real_,
+      significant = NA,
+      direction = NA_character_
+    ))
   }
-}
-
-if (!time_filtered && length(year_candidates) > 0) {
-  year_column <- year_candidates[1]
   
-  if (is.numeric(spain_data[[year_column]])) {
-    spain_data <- spain_data[
-      spain_data[[year_column]] >= start_year &
-        spain_data[[year_column]] <= end_year,
-      ,
-      drop = FALSE
-    ]
-    
-    spain_data$plot_time <- as.Date(
-      paste0(spain_data[[year_column]], "-01-01")
-    )
-    
-    time_filtered <- TRUE
-  }
-}
-
-if (nrow(spain_data) == 0) {
-  stop("No Spanish observations remain after filtering 1980–2020.")
-}
-
-if (time_filtered) {
-  message("Data filtered to 1980–2020.")
-} else {
-  warning(
-    "No readable date or numeric year column was found. ",
-    "The analysis uses the full available time period."
-  )
-}
-
-available_variables <- unique(spain_data[[variable_column]])
-available_variables <- available_variables[
-  !is.na(available_variables)
-]
-
-if (length(available_variables) == 0) {
-  stop("No variables were found in the Spanish CO2 data.")
-}
-
-if (is.null(target_variable)) {
-  co2_name <- available_variables[
-    tolower(as.character(available_variables)) == "co2"
-  ]
+  order_number <- order(years)
+  values <- values[order_number]
+  years <- years[order_number]
   
-  if (length(co2_name) > 0) {
-    target_variable <- co2_name[1]
+  sen_result <- trend::sens.slope(values)
+  mk_result <- Kendall::MannKendall(values)
+  
+  slope_year <- as.numeric(sen_result$estimates)
+  p_value <- as.numeric(mk_result$sl)
+  
+  direction_text <- if (
+    slope_year > 0
+  ) {
+    "increasing"
+  } else if (
+    slope_year < 0
+  ) {
+    "decreasing"
   } else {
-    target_variable <- available_variables[1]
+    "no change"
   }
-}
-
-if (!target_variable %in% available_variables) {
-  stop(
-    "Target variable was not found: ", target_variable,
-    "\nAvailable variables: ",
-    paste(available_variables, collapse = ", ")
-  )
-}
-
-if (is.null(scatter_x_variable)) {
-  other_variables <- setdiff(
-    available_variables,
-    target_variable
-  )
   
-  if (length(other_variables) > 0) {
-    scatter_x_variable <- other_variables[1]
-  }
+  data.table(
+    number_of_years = length(values),
+    sen_slope_per_year = slope_year,
+    sen_slope_per_decade = slope_year * 10,
+    mann_kendall_p_value = p_value,
+    significant = p_value < 0.05,
+    direction = direction_text
+  )
 }
 
-message("Target variable: ", target_variable)
+# Annual trends
 
-if (!is.null(scatter_x_variable)) {
-  message("Scatterplot variable: ", scatter_x_variable)
-}
+annual_trends <- annual_data[
+  ,
+  calculate_sen_mk(
+    values = annual_value_mm,
+    years = year
+  ),
+  by = component
+]
+
+annual_trends[, `:=`(
+  period = "annual",
+  season = "all",
+  units = "mm/year change per decade"
+)]
 
 
-# Statistics for every Spanish basin and variable
+# Seasonal trends
 
-basins <- unique(spain_data[[basin_column]])
+seasonal_trends <- seasonal_data[
+  ,
+  calculate_sen_mk(
+    values = seasonal_value_mm,
+    years = year
+  ),
+  by = .(
+    component,
+    season
+  )
+]
 
-statistics_list <- list()
-counter <- 1
+seasonal_trends[, `:=`(
+  period = "seasonal",
+  units = "mm/season change per decade"
+)]
 
-for (basin_id in basins) {
-  for (variable_name in available_variables) {
-    x <- spain_data[
-      spain_data[[basin_column]] == basin_id &
-        spain_data[[variable_column]] == variable_name,
-      value_column
-    ]
-    
-    valid_x <- x[!is.na(x)]
-    
-    statistics_list[[counter]] <- data.frame(
-      basin = as.character(basin_id),
-      variable = as.character(variable_name),
-      n = length(x),
-      missing_values = sum(is.na(x)),
-      mean = if (length(valid_x) > 0) mean(valid_x) else NA_real_,
-      median = if (length(valid_x) > 0) median(valid_x) else NA_real_,
-      min = if (length(valid_x) > 0) min(valid_x) else NA_real_,
-      max = if (length(valid_x) > 0) max(valid_x) else NA_real_,
-      range = if (length(valid_x) > 0) max(valid_x) - min(valid_x) else NA_real_,
-      q25 = if (length(valid_x) > 0) unname(quantile(valid_x, 0.25)) else NA_real_,
-      q50 = if (length(valid_x) > 0) unname(quantile(valid_x, 0.50)) else NA_real_,
-      q75 = if (length(valid_x) > 0) unname(quantile(valid_x, 0.75)) else NA_real_
-    )
-    
-    counter <- counter + 1
-  }
-}
 
-statistics_table <- do.call(rbind, statistics_list)
+# Combine annual and seasonal trends
 
-write.csv(
-  statistics_table,
-  file.path(output_dir, "spain_basin_statistics.csv"),
-  row.names = FALSE
+trend_table <- rbindlist(
+  list(
+    annual_trends,
+    seasonal_trends
+  ),
+  fill = TRUE
 )
 
-message("Statistics saved.")
-
-
-# Time series, scatterplot, and stacked-bar plot for each basin
-
-for (basin_id in basins) {
-  safe_basin <- gsub(
-    "[^A-Za-z0-9_-]",
-    "_",
-    as.character(basin_id)
+trend_table[
+  ,
+  significance_result := fifelse(
+    significant,
+    "significant: p < 0.05",
+    "not significant: p >= 0.05"
   )
-  
-  basin_output_dir <- file.path(
-    output_dir,
-    "plots",
-    safe_basin
+]
+
+setcolorder(
+  trend_table,
+  c(
+    "period",
+    "season",
+    "component",
+    "number_of_years",
+    "units",
+    "sen_slope_per_year",
+    "sen_slope_per_decade",
+    "mann_kendall_p_value",
+    "significant",
+    "direction",
+    "significance_result"
   )
+)
+
+setorder(
+  trend_table,
+  period,
+  component,
+  season
+)
+
+quantile_results <- list()
+result_number <- 1
+
+for (component_name in component_names) {
   
-  dir.create(
-    basin_output_dir,
-    showWarnings = FALSE,
-    recursive = TRUE
-  )
-  
-  basin_data <- spain_data[
-    spain_data[[basin_column]] == basin_id,
-    ,
-    drop = FALSE
+  component_data <- long_data[
+    component == component_name &
+      is.finite(daily_value) &
+      is.finite(year)
   ]
   
-  target_data <- basin_data[
-    basin_data[[variable_column]] == target_variable,
-    ,
-    drop = FALSE
-  ]
-  
-  # Time series
-  
-  if (time_filtered &&
-      nrow(target_data) > 0 &&
-      !all(is.na(target_data$plot_time))) {
+  for (quantile_level in c(0.10, 0.50, 0.90)) {
     
-    p_time <- ggplot(
-      target_data,
-      aes(x = plot_time, y = .data[[value_column]])
-    ) +
-      geom_line(
-        colour = "steelblue",
-        linewidth = 0.35,
-        na.rm = TRUE
-      ) +
-      labs(
-        title = paste(
-          target_variable,
-          "time series — Spain basin",
-          basin_id
-        ),
-        subtitle = "1980–2020",
-        x = "Date",
-        y = target_variable
-      ) +
-      theme_minimal()
-    
-    ggsave(
-      file.path(basin_output_dir, "timeseries.png"),
-      p_time,
-      width = 10,
-      height = 5,
-      dpi = 300
+    quantile_model <- quantreg::rq(
+      daily_value ~ year,
+      data = component_data,
+      tau = quantile_level
     )
+    
+    slope_year <- unname(
+      coef(quantile_model)["year"]
+    )
+    
+    quantile_results[[result_number]] <- data.table(
+      component = component_name,
+      quantile = quantile_level,
+      slope_per_year = slope_year,
+      slope_per_decade = slope_year * 10,
+      units = "mm/day change per decade"
+    )
+    
+    result_number <- result_number + 1
   }
-  
+}
 
+quantile_table <- rbindlist(quantile_results)
+
+table_folder <- file.path(
+  project_folder,
+  "results",
+  "tables"
+)
+
+figure_folder <- file.path(
+  project_folder,
+  "results",
+  "figures"
+)
+
+dir.create(
+  table_folder,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+dir.create(
+  figure_folder,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+
+# generate ables
+
+fwrite(
+  annual_data,
+  file.path(
+    table_folder,
+    paste0(
+      "basin_",
+      basin_number,
+      "_annual_P_AET_PM_CO2.csv"
+    )
+  )
+)
+
+fwrite(
+  seasonal_data,
+  file.path(
+    table_folder,
+    paste0(
+      "basin_",
+      basin_number,
+      "_seasonal_P_AET_PM_CO2.csv"
+    )
+  )
+)
+
+fwrite(
+  trend_table,
+  file.path(
+    table_folder,
+    paste0(
+      "basin_",
+      basin_number,
+      "_Sen_Mann_Kendall_trends.csv"
+    )
+  )
+)
+
+fwrite(
+  quantile_table,
+  file.path(
+    table_folder,
+    paste0(
+      "basin_",
+      basin_number,
+      "_daily_quantile_trends.csv"
+    )
+  )
+)
+
+# Plot annual values
+
+annual_plot <- ggplot(
+  annual_data,
+  aes(
+    x = year,
+    y = annual_value_mm
+  )
+) +
+  geom_line(
+    colour = "#287C98",
+    linewidth = 0.7
+  ) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x,
+    se = FALSE,
+    colour = "#D97941",
+    linewidth = 0.8
+  ) +
+  facet_wrap(
+    ~ component,
+    scales = "free_y",
+    ncol = 1
+  ) +
+  theme_minimal(base_size = 12) +
+  labs(
+    title = paste(
+      "Annual trends for basin",
+      basin_number
+    ),
+    subtitle = "Precipitation, AET and PM_CO2 PET",
+    x = "Year",
+    y = "Annual total (mm/year)"
+  )
+
+ggsave(
+  filename = file.path(
+    figure_folder,
+    paste0(
+      "basin_",
+      basin_number,
+      "_annual_P_AET_PM_CO2_trends.png"
+    )
+  ),
+  plot = annual_plot,
+  width = 9,
+  height = 8,
+  dpi = 300
+)
+
+# Print annual results
+
+cat("\nAnnual trend results:\n\n")
+
+print(
+  trend_table[
+    period == "annual",
+    .(
+      component,
+      slope_mm_per_decade = round(
+        sen_slope_per_decade,
+        2
+      ),
+      p_value = signif(
+        mann_kendall_p_value,
+        4
+      ),
+      direction,
+      significance_result
+    )
+  ]
+)
+
+cat("\nAnalysis completed successfully.\n")
+cat("Tables were saved in:\n", table_folder, "\n")
+cat("Figures were saved in:\n", figure_folder, "\n")
