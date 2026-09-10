@@ -1,5 +1,5 @@
 # Annual, seasonal and daily-quantile trends for basin 6340620
-# Focus: precipitation, AET and PM_CO2 PET
+# Focus: precipitation, AET
 
 project_folder <- paste0(
   "C:/Users/Shwe Yee Win/",
