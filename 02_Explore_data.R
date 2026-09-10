@@ -1,79 +1,350 @@
-library(data.table)
+# Inspect_downloads.R
 
-out_dir <- "data/raw/zenodo_20479866"
+raw_data_folder <- "data/raw"
 
-rds_files <- list.files(
-  path = out_dir,
-  pattern = "\\.rds$",
-  full.names = TRUE,
-  recursive = TRUE
-)
-
-if (length(rds_files) == 0) {
+if (!dir.exists(raw_data_folder)) {
   stop(
-    "No RDS files found in: ", out_dir,
-    ". Run 01_download_data.R first."
+    "The data/raw folder does not exist.\n",
+    "Run the download script first."
   )
 }
 
-message("Number of RDS files found: ", length(rds_files))
+report_folder <- "results/reports"
 
-for (file in rds_files) {
-  object <- readRDS(file)
+dir.create(
+  report_folder,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+report_file <- file.path(
+  report_folder,
+  "downloaded_data_summary.txt"
+)
+
+all_files <- list.files(
+  path = raw_data_folder,
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+if (length(all_files) == 0) {
+  stop("No downloaded files were found in data/raw.")
+}
+
+# Identify the extensions of all downloaded files.
+file_extensions <- tolower(
+  tools::file_ext(all_files)
+)
+
+file_type_summary <- table(file_extensions)
+
+netcdf_files <- list.files(
+  path = raw_data_folder,
+  pattern = "\\.nc$",
+  recursive = TRUE,
+  full.names = TRUE,
+  ignore.case = TRUE
+)
+
+rds_files <- list.files(
+  path = raw_data_folder,
+  pattern = "\\.rds$",
+  recursive = TRUE,
+  full.names = TRUE,
+  ignore.case = TRUE
+)
+
+sink(report_file, split = TRUE)
+
+cat("DOWNLOADED DATA SUMMARY\n")
+cat("=======================\n\n")
+
+cat("Project folder:\n")
+cat(getwd(), "\n\n")
+
+cat("Data folder:\n")
+cat(file.path(getwd(), raw_data_folder), "\n\n")
+
+cat("Total number of downloaded files:", length(all_files), "\n\n")
+
+cat("FILE TYPES\n")
+cat("----------\n")
+
+print(file_type_summary)
+
+cat("\n")
+
+cat("Number of NetCDF files:", length(netcdf_files), "\n")
+cat("Number of RDS files:", length(rds_files), "\n")
+
+cat("\n\n")
+cat("NETCDF FILES\n")
+cat("============\n")
+
+if (length(netcdf_files) == 0) {
   
-  cat("\n-----------------------------\n")
-  cat("File name:", basename(file), "\n")
-  cat("Class:", class(object), "\n")
-  cat("Type:", typeof(object), "\n")
+  cat("\nNo NetCDF files were found.\n")
   
-  if (is.data.frame(object)) {
-    cat("Rows:", nrow(object), "\n")
-    cat("Columns:", ncol(object), "\n")
-    cat("Column names:\n")
-    print(names(object))
-  } else if (is.list(object)) {
-    cat("This file contains a list.\nList names:\n")
-    print(names(object))
-  } else {
-    cat("Structure:\n")
-    str(object)
+} else {
+  
+  # Install ncdf4 if it is not already installed.
+  if (!requireNamespace("ncdf4", quietly = TRUE)) {
+    
+    sink()
+    
+    install.packages(
+      "ncdf4",
+      repos = "https://cloud.r-project.org"
+    )
+    
+    sink(report_file, append = TRUE, split = TRUE)
+  }
+  
+  for (file_number in seq_along(netcdf_files)) {
+    
+    file_path <- netcdf_files[file_number]
+    
+    cat("\n")
+    cat("--------------------------------------------------\n")
+    cat("NetCDF file number:", file_number, "\n")
+    cat("File:", file_path, "\n")
+    
+    file_size_mb <- file.info(file_path)$size / 1024^2
+    
+    cat(
+      "File size:",
+      round(file_size_mb, 2),
+      "MB\n"
+    )
+    
+    netcdf_data <- ncdf4::nc_open(file_path)
+    
+    variable_names <- names(netcdf_data$var)
+    
+    cat(
+      "Number of variables:",
+      length(variable_names),
+      "\n"
+    )
+    
+    cat(
+      "Variables:",
+      paste(variable_names, collapse = ", "),
+      "\n"
+    )
+    
+    for (variable_name in variable_names) {
+      
+      variable_information <- netcdf_data$var[[variable_name]]
+      
+      units_information <- ncdf4::ncatt_get(
+        netcdf_data,
+        variable_name,
+        "units"
+      )
+      
+      if (isTRUE(units_information$hasatt)) {
+        variable_units <- units_information$value
+      } else {
+        variable_units <- "Not specified"
+      }
+      
+      dimension_names <- vapply(
+        variable_information$dim,
+        function(dimension) dimension$name,
+        character(1)
+      )
+      
+      dimension_lengths <- vapply(
+        variable_information$dim,
+        function(dimension) dimension$len,
+        numeric(1)
+      )
+      
+      cat("\n")
+      cat("Variable:", variable_name, "\n")
+      cat("Units:", variable_units, "\n")
+      
+      cat(
+        "Dimensions:",
+        paste(dimension_names, collapse = ", "),
+        "\n"
+      )
+      
+      cat(
+        "Dimension lengths:",
+        paste(dimension_lengths, collapse = " x "),
+        "\n"
+      )
+      
+      cat(
+        "Number of values:",
+        prod(dimension_lengths),
+        "\n"
+      )
+    }
+    
+    # Print information about the time dimension when available.
+    dimension_names <- names(netcdf_data$dim)
+    
+    if ("time" %in% dimension_names) {
+      
+      time_values <- netcdf_data$dim$time$vals
+      time_units <- netcdf_data$dim$time$units
+      
+      cat("\nTime information:\n")
+      cat("Time units:", time_units, "\n")
+      cat("First time value:", min(time_values, na.rm = TRUE), "\n")
+      cat("Last time value:", max(time_values, na.rm = TRUE), "\n")
+      cat("Number of time steps:", length(time_values), "\n")
+    }
+    
+    ncdf4::nc_close(netcdf_data)
   }
 }
 
-hydro_data <- as.data.table(readRDS(rds_files[1]))
+cat("\n\n")
+cat("RDS FILES\n")
+cat("=========\n")
 
-numeric_cols <- names(hydro_data)[sapply(hydro_data, is.numeric)]
-
-if (length(numeric_cols) == 0) {
-  stop("The first RDS file has no numeric columns.")
+if (length(rds_files) == 0) {
+  
+  cat("\nNo RDS files were found.\n")
+  
+} else {
+  
+  for (file_number in seq_along(rds_files)) {
+    
+    file_path <- rds_files[file_number]
+    
+    cat("\n")
+    cat("--------------------------------------------------\n")
+    cat("RDS file number:", file_number, "\n")
+    cat("File:", file_path, "\n")
+    
+    file_size_mb <- file.info(file_path)$size / 1024^2
+    
+    cat(
+      "File size:",
+      round(file_size_mb, 2),
+      "MB\n"
+    )
+    
+    rds_data <- readRDS(file_path)
+    
+    cat(
+      "Object class:",
+      paste(class(rds_data), collapse = ", "),
+      "\n"
+    )
+    
+    if (
+      is.data.frame(rds_data) ||
+      data.table::is.data.table(rds_data)
+    ) {
+      
+      cat("Number of rows:", nrow(rds_data), "\n")
+      cat("Number of columns:", ncol(rds_data), "\n")
+      
+      cat(
+        "Column names:",
+        paste(names(rds_data), collapse = ", "),
+        "\n"
+      )
+      
+      # Print basin information.
+      if ("basin" %in% names(rds_data)) {
+        
+        basin_values <- unique(
+          as.character(rds_data$basin)
+        )
+        
+        cat(
+          "Number of basins:",
+          length(basin_values),
+          "\n"
+        )
+        
+        cat(
+          "First basin IDs:",
+          paste(head(basin_values, 20), collapse = ", "),
+          "\n"
+        )
+      }
+      
+      # Print variable information.
+      if ("variable" %in% names(rds_data)) {
+        
+        variable_values <- sort(
+          unique(as.character(rds_data$variable))
+        )
+        
+        cat(
+          "Hydrological variables:",
+          paste(variable_values, collapse = ", "),
+          "\n"
+        )
+      }
+      
+      # Print PET methods.
+      if ("pet_method" %in% names(rds_data)) {
+        
+        pet_methods <- sort(
+          unique(as.character(rds_data$pet_method))
+        )
+        
+        cat(
+          "PET methods:",
+          paste(pet_methods, collapse = ", "),
+          "\n"
+        )
+      }
+      
+      # Print the date range.
+      if ("date" %in% names(rds_data)) {
+        
+        date_values <- as.Date(rds_data$date)
+        
+        cat(
+          "First date:",
+          as.character(min(date_values, na.rm = TRUE)),
+          "\n"
+        )
+        
+        cat(
+          "Last date:",
+          as.character(max(date_values, na.rm = TRUE)),
+          "\n"
+        )
+      }
+      
+      cat("\nFirst six rows:\n")
+      print(head(rds_data))
+      
+    } else {
+      
+      cat("\nStructure of the RDS object:\n")
+      str(rds_data, max.level = 2)
+    }
+    
+    # Remove the large object before reading the next file.
+    rm(rds_data)
+    gc()
+  }
 }
 
-# Create summary statistics
-stats_table <- rbindlist(lapply(numeric_cols, function(col) {
-  x <- hydro_data[[col]]
-  
-  data.table(
-    variable = col,
-    mean = mean(x, na.rm = TRUE),
-    median = median(x, na.rm = TRUE),
-    min = min(x, na.rm = TRUE),
-    max = max(x, na.rm = TRUE),
-    range = max(x, na.rm = TRUE) - min(x, na.rm = TRUE),
-    q25 = quantile(x, 0.25, na.rm = TRUE),
-    q50 = quantile(x, 0.50, na.rm = TRUE),
-    q75 = quantile(x, 0.75, na.rm = TRUE)
-  )
-}))
+# Report
 
-print(stats_table)
+cat("\n\n")
+cat("SUMMARY COMPLETED\n")
+cat("=================\n")
 
-# save statistics
-dir.create("outputs", showWarnings = FALSE, recursive = TRUE)
+cat("\nReport saved to:\n")
+cat(file.path(getwd(), report_file), "\n")
 
-write.csv(
-  stats_table,
-  "outputs/summary_statistics.csv",
-  row.names = FALSE
-)
+sink()
 
-message("Summary statistics saved in: outputs/summary_statistics.csv")
+cat("\nInspection completed successfully.\n")
+cat("The report was saved here:\n")
+cat(file.path(getwd(), report_file), "\n")
