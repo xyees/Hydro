@@ -439,3 +439,54 @@ if (converted_count == 0) {
   )
 }
       
+# calculate the water-balance residual.
+
+source("R/00_config.R")
+library(data.table)
+library(ggplot2)
+
+daily_data <- readRDS("data/processed/daily_country_series.rds")
+setorder(daily_data, date)
+
+component_names <- c("precipitation", "aet", "pet", "runoff", "tws")
+qc_results <- list()
+
+for (component_name in component_names) {
+  values <- daily_data[[component_name]]
+
+  qc_results[[component_name]] <- data.table(
+    component = component_name,
+    missing_days = sum(is.na(values)),
+    minimum = min(values, na.rm = TRUE),
+    maximum = max(values, na.rm = TRUE),
+    negative_days = sum(values < 0, na.rm = TRUE)
+  )
+}
+
+qc_table <- rbindlist(qc_results)
+fwrite(qc_table, "results/tables/qc_summary.csv")
+
+# TWS is a storage. Therefore, use its daily change (not its daily value)
+# in the daily water balance: P - AET - Q - delta(TWS).
+daily_data[, change_in_tws := c(NA_real_, diff(tws))]
+daily_data[, water_balance_residual := precipitation - aet - runoff - change_in_tws]
+daily_data[, year := as.integer(format(date, "%Y"))]
+
+annual_balance <- daily_data[, .(
+  precipitation_mm = sum(precipitation, na.rm = TRUE),
+  aet_mm = sum(aet, na.rm = TRUE),
+  runoff_mm = sum(runoff, na.rm = TRUE),
+  change_in_tws_mm = last(tws) - first(tws),
+  residual_mm = sum(water_balance_residual, na.rm = TRUE)
+), by = year]
+
+fwrite(annual_balance, "results/tables/annual_water_balance.csv")
+
+balance_plot <- ggplot(annual_balance, aes(year, residual_mm)) +
+  geom_hline(yintercept = 0, colour = "grey40") +
+  geom_col(fill = "#6baed6") +
+  theme_minimal() +
+  labs(x = NULL, y = "P - AET - Q - delta TWS (mm/year)")
+
+ggsave("results/figures/annual_water_balance_residual.png", balance_plot, width = 8, height = 4, dpi = 300)
+saveRDS(daily_data, "data/processed/daily_country_qc.rds")
